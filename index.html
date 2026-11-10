@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Splitter</title>
+<meta name="description" content="Split a big video into clips under 400 MB, right in your browser. Nothing is uploaded.">
+<style>
+  :root {
+    --bg: #f5f5f2; --card: #ffffff; --text: #1c1c1a; --muted: #6b6b66; --line: #e2e2dc;
+    --accent: #c2552d; --accent-text: #ffffff; --ok: #2e7d4f; --bad: #b3261e; --soft: #f0efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --card: #1f1f1d; --text: #ecece6; --muted: #9c9c94; --line: #33332f;
+      --accent: #e07a52; --accent-text: #1a1a18; --ok: #6cc391; --bad: #f2867d; --soft: #2a2a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 26px; margin: 8px 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  .pick {
+    display: block; text-align: center; padding: 28px 16px; cursor: pointer;
+    border: 2px dashed var(--line); border-radius: 14px; background: var(--card); margin-bottom: 14px;
+  }
+  .pick strong { display: block; font-size: 18px; margin-bottom: 4px; }
+  .pick span { color: var(--muted); font-size: 14px; }
+  .pick.over { border-color: var(--accent); }
+  input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+  .stat { background: var(--soft); border-radius: 10px; padding: 10px; min-width: 0; }
+  .stat small { display: block; color: var(--muted); font-size: 12px; }
+  .stat b { font-size: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .name { font-weight: 600; overflow-wrap: anywhere; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .limit input {
+    width: 90px; font: inherit; padding: 8px 10px; border-radius: 8px; text-align: right;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  }
+  button, a.btn {
+    font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 10px 16px; cursor: pointer;
+    background: var(--accent); color: var(--accent-text); text-decoration: none; display: inline-block;
+  }
+  button.quiet, a.btn.quiet { background: var(--soft); color: var(--text); }
+  button:disabled { opacity: .45; cursor: default; }
+  .clip { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .clip:first-child { border-top: 0; }
+  .clip .info { flex: 1; min-width: 0; }
+  .clip .info b { display: block; }
+  .clip .info small { color: var(--muted); }
+  .clip .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  progress { width: 100%; height: 6px; margin-top: 6px; accent-color: var(--accent); }
+  .msg { color: var(--muted); font-size: 14px; }
+  .msg.bad { color: var(--bad); }
+  .ok { color: var(--ok); }
+  .hidden { display: none !important; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Video Splitter</h1>
+  <p class="sub">Cuts a big video into clips under your size limit. Quality stays the same, and the video never leaves your device.</p>
+
+  <label class="pick" id="pick">
+    <input type="file" id="file" accept="video/*,.mp4,.mov,.m4v,.mkv,.webm">
+    <strong>Choose a video</strong>
+    <span>MP4 or MOV works best</span>
+  </label>
+
+  <div class="card hidden" id="summary">
+    <div class="name" id="name"></div>
+    <div class="stats">
+      <div class="stat"><small>Size</small><b id="sSize">—</b></div>
+      <div class="stat"><small>Length</small><b id="sLen">—</b></div>
+      <div class="stat"><small>Clips</small><b id="sClips">—</b></div>
+    </div>
+    <div class="row limit" style="margin-top:14px">
+      <label for="limit">Max size per clip</label>
+      <input type="number" id="limit" value="400" min="5" step="10" inputmode="numeric"> <span>MB</span>
+    </div>
+  </div>
+
+  <p class="msg" id="msg"></p>
+
+  <div class="card hidden" id="clipsCard">
+    <div id="clips"></div>
+    <div class="row" style="margin-top:12px; justify-content:flex-end">
+      <button class="quiet" id="saveAll">Save all clips</button>
+    </div>
+  </div>
+
+  <footer>Tap Save on a clip to make it and download it. On a phone, do one clip at a time and keep this page open while it works.</footer>
+</main>
+
+<script type="module">
+import {
+  Input, Output, BlobSource, ALL_FORMATS, EncodedPacketSink, EncodedVideoPacketSource,
+  EncodedAudioPacketSource, Mp4OutputFormat, MovOutputFormat, StreamTarget,
+} from 'https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs';
+
+const $ = (id) => document.getElementById(id);
+const EPS = 1e-4;
+
+const state = { file: null, input: null, video: null, audio: null, duration: 0, gops: [], otherRate: 0,
+                clips: [], busy: false, ready: null /* {index, url, blob, name} */ };
+
+const fmtSize = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(b >= 1e8 ? 0 : 1) + ' MB';
+const fmtTime = (s) => {
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+};
+const setMsg = (text, bad = false) => { $('msg').textContent = text; $('msg').classList.toggle('bad', bad); };
+const limitBytes = () => Math.max(5, Number($('limit').value) || 400) * 1e6;
+
+// ---- reading the video and planning the cuts ----
+
+async function load(file) {
+  freeReady();
+  Object.assign(state, { file, input: null, video: null, audio: null, clips: [], gops: [] });
+  $('summary').classList.remove('hidden');
+  $('clipsCard').classList.add('hidden');
+  $('name').textContent = file.name;
+  $('sSize').textContent = fmtSize(file.size);
+  $('sLen').textContent = '—';
+  $('sClips').textContent = '—';
+  setMsg('Reading the video…');
+
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  const video = await input.getPrimaryVideoTrack();
+  if (!video) throw new Error('No video found in this file.');
+  if (!(await video.getCodec())) throw new Error('This video uses a format that cannot be split here.');
+  const audio = await input.getPrimaryAudioTrack();
+  const duration = await input.computeDuration();
+  $('sLen').textContent = fmtTime(duration);
+
+  // One pass over the video's packet list (sizes and times only, no video data is read).
+  const sink = new EncodedPacketSink(video);
+  const gops = [];
+  let videoBytes = 0, n = 0;
+  for await (const p of sink.packets(undefined, undefined, { metadataOnly: true })) {
+    if (p.type === 'key' || gops.length === 0) gops.push({ t: p.timestamp, bytes: 0 });
+    gops[gops.length - 1].bytes += p.byteLength;
+    videoBytes += p.byteLength;
+    if (++n % 20000 === 0) await new Promise((r) => setTimeout(r));
+  }
+  if (!gops.length) throw new Error('This video has no frames.');
+  gops[0].t = Math.min(gops[0].t, await video.getFirstTimestamp());
+
+  Object.assign(state, { input, video, audio, duration, gops,
+                         otherRate: Math.max(0, file.size - videoBytes) / Math.max(duration, 0.001) });
+  plan();
+}
+
+/** Groups the video's keyframe-to-keyframe sections into clips that each fit under the limit. */
+function plan() {
+  freeReady();
+  const { gops, duration, otherRate, file } = state;
+  if (!gops.length) return;
+  const hard = limitBytes() * 0.97;               // headroom for the clip's own index
+  const end = (i) => i + 1 < gops.length ? gops[i + 1].t : Math.max(duration, gops[i].t);
+  const cost = gops.map((g, i) => g.bytes + otherRate * Math.max(0, end(i) - g.t));
+  const total = cost.reduce((a, b) => a + b, 0);
+
+  let clips = [];
+  if (file.size <= limitBytes()) {
+    clips = [{ start: gops[0].t, end: Infinity, bytes: file.size, whole: true }];
+  } else {
+    if (Math.max(...cost) > hard) {
+      state.clips = [];
+      render();
+      setMsg('This video cannot be cut into clips this small without re-encoding it. Try a larger limit.', true);
+      return;
+    }
+    // Aim for clips of equal size; if cut points don't allow that many, try one more clip.
+    const least = Math.ceil(total / hard);
+    for (let n = least; n <= least + 3; n++) {
+      const even = total / n;
+      clips = [];
+      let cur = null, done = 0;
+      cost.forEach((c, i) => {
+        const pastTarget = done + c / 2 > (clips.length + 1) * even;
+        if (cur && (cur.bytes + c > hard || pastTarget)) { cur.end = gops[i].t; clips.push(cur); cur = null; }
+        cur ??= { start: gops[i].t, end: Infinity, bytes: 0 };
+        cur.bytes += c;
+        done += c;
+      });
+      clips.push(cur);
+      if (clips.length <= n) break;
+    }
+  }
+  state.clips = clips;
+  render();
+  setMsg(clips.length === 1 && clips[0].whole
+    ? 'This video is already under the limit — no need to split it.'
+    : `Ready: ${clips.length} clips, each under ${$('limit').value} MB.`);
+}
+
+// ---- making one clip ----
+
+/** Collects the muxer's output as a Blob, so a 400 MB clip never needs one giant block of memory. */
+function blobCollector() {
+  const parts = [], patches = [];
+  let end = 0;
+  const writable = new WritableStream({
+    write({ data, position }) {
+      if (position > end) { parts.push(new Blob([new Uint8Array(position - end)])); end = position; }
+      if (position === end) { parts.push(new Blob([data])); end += data.byteLength; }
+      else patches.push({ position, data: data.slice() });   // a rewrite of bytes already written
+    },
+  });
+  const finish = (type) => {
+    let blob = new Blob(parts, { type });
+    for (const { position, data } of patches) {
+      blob = new Blob([blob.slice(0, position), data, blob.slice(position + data.byteLength)], { type });
+    }
+    return blob;
+  };
+  return { writable, finish };
+}
+
+async function makeClip(index, onProgress) {
+  const { video, audio, clips, duration, file } = state;
+  const clip = clips[index];
+  if (clip.whole) return { blob: file, ext: (file.name.match(/\.([^.]+)$/) || [, 'mp4'])[1] };
+
+  const vCodec = await video.getCodec();
+  const aCodec = audio ? await audio.getCodec() : null;
+  let format = new Mp4OutputFormat({ fastStart: false });
+  const fits = (f) => f.getSupportedCodecs().includes(vCodec) && (!aCodec || f.getSupportedCodecs().includes(aCodec));
+  if (!fits(format)) format = new MovOutputFormat({ fastStart: false });
+  const useAudio = audio && aCodec && format.getSupportedCodecs().includes(aCodec);
+  if (!format.getSupportedCodecs().includes(vCodec)) throw new Error('This video format cannot be split here.');
+
+  const collector = blobCollector();
+  const output = new Output({ format, target: new StreamTarget(collector.writable, { chunked: true, chunkSize: 4 * 1024 * 1024 }) });
+  const vSource = new EncodedVideoPacketSource(vCodec);
+  output.addVideoTrack(vSource, { rotation: await video.getRotation() });
+  const aSource = useAudio ? new EncodedAudioPacketSource(aCodec) : null;
+  if (aSource) output.addAudioTrack(aSource);
+  await output.start();
+
+  try {
+    const vSink = new EncodedPacketSink(video);
+    const startPacket = await vSink.getKeyPacket(clip.start + EPS) ?? await vSink.getFirstPacket();
+    const endPacket = clip.end === Infinity ? undefined : (await vSink.getKeyPacket(clip.end + EPS) ?? undefined);
+    const vIter = vSink.packets(startPacket, endPacket)[Symbol.asyncIterator]();
+
+    let aIter = null;
+    if (aSource) {
+      const aSink = new EncodedPacketSink(audio);
+      const first = await aSink.getPacket(clip.start) ?? await aSink.getFirstPacket();
+      if (first) aIter = aSink.packets(first)[Symbol.asyncIterator]();
+    }
+    const nextAudio = async () => {
+      if (!aIter) return null;
+      const r = await aIter.next();
+      return r.done || r.value.timestamp >= clip.end - EPS ? null : r.value;
+    };
+    const nextVideo = async () => { const r = await vIter.next(); return r.done ? null : r.value; };
+
+    let vMeta = { decoderConfig: await video.getDecoderConfig() };
+    let aMeta = aSource ? { decoderConfig: await audio.getDecoderConfig() } : undefined;
+    let v = await nextVideo(), a = await nextAudio();
+    let written = 0, lastShown = 0;
+    // Feed both tracks in time order so the muxer never has to hold one track back in memory.
+    while (v || a) {
+      if (v && (!a || v.timestamp <= a.timestamp)) {
+        if (v.timestamp >= clip.start - EPS) {   // frames shown before the cut point belong to the previous clip
+          await vSource.add(v.clone({ timestamp: v.timestamp - clip.start }), vMeta);
+          vMeta = undefined;
+        }
+        written += v.byteLength;
+        v = await nextVideo();
+      } else {
+        await aSource.add(a.clone({ timestamp: Math.max(0, a.timestamp - clip.start) }), aMeta);
+        aMeta = undefined;
+        written += a.byteLength;
+        a = await nextAudio();
+      }
+      if (written - lastShown > 2e6) { lastShown = written; onProgress?.(Math.min(0.99, written / clip.bytes)); }
+    }
+    await aIter?.return?.();
+    await output.finalize();
+  } catch (e) {
+    try { await output.cancel(); } catch {}
+    throw e;
+  }
+  void duration;
+  return { blob: collector.finish(format.mimeType), ext: format.fileExtension.replace(/^\./, '') };
+}
+
+// ---- interface ----
+
+function freeReady() {
+  if (state.ready) { URL.revokeObjectURL(state.ready.url); state.ready = null; }
+}
+
+function clipName(index, ext) {
+  const base = state.file.name.replace(/\.[^.]+$/, '');
+  if (state.clips[index].whole) return state.file.name;
+  return `${base} - part ${String(index + 1).padStart(2, '0')}.${ext}`;
+}
+
+function render() {
+  const { clips, duration } = state;
+  $('sClips').textContent = clips.length || '—';
+  $('clipsCard').classList.toggle('hidden', !clips.length);
+  $('saveAll').classList.toggle('hidden', clips.length < 2);
+  const box = $('clips');
+  box.textContent = '';
+  clips.forEach((clip, i) => {
+    const row = document.createElement('div');
+    row.className = 'clip';
+    row.dataset.i = i;
+    const endT = clip.end === Infinity ? duration : clip.end;
+    row.innerHTML = `<div class="info"><b>Clip ${i + 1}</b>
+      <small>${fmtTime(clip.start)} – ${fmtTime(endT)} · about ${fmtSize(clip.bytes)}</small>
+      <progress class="hidden" max="1" value="0"></progress><small class="note"></small></div>
+      <div class="actions"><button class="save">Save</button></div>`;
+    row.querySelector('.save').addEventListener('click', () => saveClip(i).catch(() => {}));
+    box.append(row);
+  });
+}
+
+function triggerDownload(url, name) {
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.append(a); a.click(); a.remove();
+}
+
+async function saveClip(i) {
+  if (state.busy) return;
+  const row = $('clips').querySelector(`[data-i="${i}"]`);
+  const bar = row.querySelector('progress'), note = row.querySelector('.note'), actions = row.querySelector('.actions');
+  state.busy = true;
+  document.querySelectorAll('.save, #saveAll').forEach((b) => b.disabled = true);
+  // Only one finished clip is kept in memory at a time.
+  if (state.ready) {
+    const old = $('clips').querySelector(`[data-i="${state.ready.index}"]`);
+    if (old) {
+      old.querySelector('.actions').innerHTML = '<button class="save quiet">Save again</button>';
+      const idx = state.ready.index;
+      old.querySelector('.save').addEventListener('click', () => saveClip(idx).catch(() => {}));
+      old.querySelector('.save').disabled = true;
+    }
+    freeReady();
+  }
+  bar.classList.remove('hidden'); bar.value = 0;
+  note.textContent = ''; note.className = 'note';
+  try {
+    const { blob, ext } = await makeClip(i, (f) => { bar.value = f; });
+    const name = clipName(i, ext);
+    const url = URL.createObjectURL(blob);
+    state.ready = { index: i, url, blob, name };
+    bar.classList.add('hidden');
+    const over = blob.size > limitBytes();
+    note.textContent = over ? `Came out at ${fmtSize(blob.size)} — lower the limit a little and try again.`
+                            : `Done · ${fmtSize(blob.size)}`;
+    note.className = 'note ' + (over ? 'msg bad' : 'ok');
+    actions.textContent = '';
+    const link = document.createElement('a');
+    link.className = 'btn'; link.href = url; link.download = name; link.textContent = 'Download';
+    actions.append(link);
+    const shareFile = new File([blob], name, { type: blob.type || 'video/mp4' });
+    if (navigator.canShare?.({ files: [shareFile] })) {
+      const share = document.createElement('button');
+      share.className = 'quiet'; share.textContent = 'Share';
+      share.addEventListener('click', () => navigator.share({ files: [shareFile] }).catch(() => {}));
+      actions.append(share);
+    }
+    triggerDownload(url, name);
+    return blob;
+  } catch (e) {
+    bar.classList.add('hidden');
+    note.textContent = e?.message || 'Something went wrong making this clip.';
+    note.className = 'note msg bad';
+    throw e;
+  } finally {
+    state.busy = false;
+    document.querySelectorAll('.save, #saveAll').forEach((b) => b.disabled = false);
+  }
+}
+
+$('saveAll').addEventListener('click', async () => {
+  for (let i = 0; i < state.clips.length; i++) {
+    try { await saveClip(i); } catch { break; }
+    await new Promise((r) => setTimeout(r, 1200));   // give the browser time to start each download
+  }
+});
+
+async function choose(file) {
+  if (!file || state.busy) return;
+  try { await load(file); }
+  catch (e) {
+    state.clips = []; render();
+    setMsg(e?.message || 'This file could not be read as a video.', true);
+  }
+}
+
+$('file').addEventListener('change', (e) => choose(e.target.files[0]));
+$('limit').addEventListener('change', () => { if (!state.busy) plan(); });
+const pick = $('pick');
+['dragenter', 'dragover'].forEach((t) => pick.addEventListener(t, (e) => { e.preventDefault(); pick.classList.add('over'); }));
+['dragleave', 'drop'].forEach((t) => pick.addEventListener(t, (e) => { e.preventDefault(); pick.classList.remove('over'); }));
+pick.addEventListener('drop', (e) => choose(e.dataTransfer.files[0]));
+
+window.videoSplitter = { state, load, plan, makeClip };   // handy for testing from the console
+</script>
+</body>
+</html>
